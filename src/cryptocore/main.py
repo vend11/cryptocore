@@ -1,9 +1,9 @@
-"""Точка входа CryptoCore: CLI, обработка IV, файловый ввод-вывод."""
+"""Точка входа CryptoCore: CLI, обработка ключа и IV, файловый ввод-вывод."""
 
-import os
 import sys
 
 from cryptocore import CryptoCoreError, cli_parser, file_io
+from cryptocore.csprng import generate_random_bytes
 from cryptocore.modes import cbc, cfb, ctr, ecb, ofb
 
 BLOCK_SIZE = 16
@@ -27,7 +27,7 @@ def _process(args, data):
         return module.decrypt(args.key, data)
 
     if args.encrypt:
-        iv = os.urandom(BLOCK_SIZE)  # CSPRNG
+        iv = generate_random_bytes(BLOCK_SIZE)  # IV из CSPRNG
         return iv + module.encrypt(args.key, iv, data)  # IV в начале файла
 
     if args.iv is not None:
@@ -46,6 +46,9 @@ def main(argv=None):
     try:
         args = cli_parser.parse_args(argv)
         data = file_io.read_file(args.input)
+        if args.key is None:  # ключ не передан — генерируем для шифрования
+            args.key = generate_random_bytes(cli_parser.KEY_SIZES[args.algorithm])
+            print(f"[INFO] Generated random key: {args.key.hex()}", flush=True)
         result = _process(args, data)
         file_io.write_file(args.output, result)
     except (CryptoCoreError, ValueError) as exc:

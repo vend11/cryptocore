@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import sys
 
 from cryptocore import CryptoCoreError
 
@@ -15,6 +16,21 @@ def _same_file(path_a, path_b):
     """True, если оба пути указывают на один файл (регистр, symlink, '..')."""
     return (os.path.normcase(os.path.realpath(path_a))
             == os.path.normcase(os.path.realpath(path_b)))
+
+
+def _is_weak_key(key):
+    """True для тривиальных ключей: все байты равны или идут с постоянным шагом."""
+    if len(set(key)) < 2:
+        return True
+    steps = {(b - a) % 256 for a, b in zip(key, key[1:])}
+    return len(steps) == 1
+
+
+def _warn_if_weak_key(key):
+    """Предупреждение о слабом ключе в stderr, работу не блокирует."""
+    if _is_weak_key(key):
+        print("cryptocore: warning: provided key looks weak "
+              "(all bytes equal or sequential)", file=sys.stderr)
 
 
 def build_parser():
@@ -32,8 +48,9 @@ def build_parser():
                      help="encrypt the input file")
     ops.add_argument("--decrypt", action="store_true",
                      help="decrypt the input file")
-    parser.add_argument("--key", required=True,
-                        help="AES-128 key as a hex string (32 hex chars)")
+    parser.add_argument("--key",
+                        help="AES-128 key as a hex string (32 hex chars), "
+                             "optional for --encrypt: generated if omitted")
     parser.add_argument("--iv",
                         help="IV as a hex string (32 hex chars), "
                              "decryption of cbc/cfb/ofb/ctr only")
@@ -47,17 +64,21 @@ def parse_args(argv=None):
     """Разбирает аргументы, валидирует ключ, IV и пути, возвращает args."""
     args = build_parser().parse_args(argv)
 
-    try:  # ключ в hex
-        key = bytes.fromhex(args.key)
-    except ValueError:
-        raise CryptoCoreError(
-            f"invalid key '{args.key}': expected a hexadecimal string") from None
-
-    expected = KEY_SIZES[args.algorithm]
-    if len(key) != expected:
-        raise CryptoCoreError(
-            f"invalid key length: got {len(key)} bytes, "
-            f"expected {expected} bytes (AES-128)")
+    if args.key is not None:  # ключ передан явно
+        try:
+            key = bytes.fromhex(args.key)
+        except ValueError:
+            raise CryptoCoreError(
+                f"invalid key '{args.key}': expected a hexadecimal string") from None
+        expected = KEY_SIZES[args.algorithm]
+        if len(key) != expected:
+            raise CryptoCoreError(
+                f"invalid key length: got {len(key)} bytes, "
+                f"expected {expected} bytes (AES-128)")
+        _warn_if_weak_key(key)
+        args.key = key
+    elif not args.encrypt:  # при расшифровке ключ обязателен
+        raise CryptoCoreError("--key is required for decryption")
 
     iv = None
     if args.iv is not None:
@@ -86,6 +107,5 @@ def parse_args(argv=None):
         raise CryptoCoreError(
             f"output file '{args.output}' would overwrite the input file")
 
-    args.key = key
     args.iv = iv
     return args
