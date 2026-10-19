@@ -1,6 +1,7 @@
-"""Тесты CryptoCore: PKCS#7, режимы, CLI, IV, интероперабельность с OpenSSL."""
+"""Тесты CryptoCore: PKCS#7, режимы, CLI, IV, CSPRNG, интероп с OpenSSL."""
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -329,6 +330,69 @@ def test_cli_output_overwrite_input(tmp_path, out_name):
     assert r.returncode != 0
     assert "overwrite" in r.stderr.lower()
     assert src.read_bytes() == b"precious data"
+
+
+# --- Спринт 3: генерация ключа без --key ---
+
+KEY_INFO_RE = re.compile(r"Generated random key: ([0-9a-f]{32})")
+
+
+@pytest.mark.parametrize("mode", ("ecb",) + IV_MODES)
+def test_cli_generated_key_roundtrip(tmp_path, mode):
+    # TEST-1: шифрование без --key печатает ключ и успешно шифрует
+    src = tmp_path / "plain.bin"
+    enc = tmp_path / "cipher.bin"
+    dec = tmp_path / "result.bin"
+    data = os.urandom(53)
+    src.write_bytes(data)
+
+    r1 = run_cli("--algorithm", "aes", "--mode", mode, "--encrypt",
+                 "--input", str(src), "--output", str(enc))
+    assert r1.returncode == 0
+    m = KEY_INFO_RE.search(r1.stdout)
+    assert m, r1.stdout
+    key_hex = m.group(1)
+
+    # KEY-3: ключ не пишется в файл шифртекста (в начале файла IV)
+    if mode != "ecb":
+        assert enc.read_bytes()[:16] != bytes.fromhex(key_hex)
+
+    r2 = run_cli("--algorithm", "aes", "--mode", mode, "--decrypt",
+                 "--key", key_hex, "--input", str(enc), "--output", str(dec))
+    assert r2.returncode == 0
+    assert dec.read_bytes() == data
+
+
+def test_cli_decrypt_requires_key(tmp_path):
+    # CLI-4: расшифрование без ключа — ошибка
+    src = tmp_path / "f.bin"
+    src.write_bytes(b"\x00" * 32)
+    r = run_cli("--algorithm", "aes", "--mode", "cbc", "--decrypt",
+                "--input", str(src))
+    assert r.returncode != 0
+    assert "key" in r.stderr.lower()
+
+
+@pytest.mark.parametrize("weak_hex", ["00" * 16, KEY_HEX])
+def test_cli_weak_key_warning(tmp_path, weak_hex):
+    # CLI-5: слабый ключ — предупреждение в stderr, работа продолжается
+    src = tmp_path / "f.txt"
+    enc = tmp_path / "f.enc"
+    src.write_text("abc")
+    r = run_cli("--algorithm", "aes", "--mode", "ecb", "--encrypt",
+                "--key", weak_hex, "--input", str(src), "--output", str(enc))
+    assert r.returncode == 0
+    assert "warning" in r.stderr.lower()
+    assert enc.read_bytes()
+
+
+def test_cli_strong_key_no_warning(tmp_path):
+    src = tmp_path / "f.txt"
+    src.write_text("abc")
+    r = run_cli("--algorithm", "aes", "--mode", "ecb", "--encrypt",
+                "--key", os.urandom(16).hex(), "--input", str(src))
+    assert r.returncode == 0
+    assert "warning" not in r.stderr.lower()
 
 
 # --- Спринт 2: интероперабельность с OpenSSL ---
