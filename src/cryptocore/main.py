@@ -1,60 +1,90 @@
-"""Точка входа CryptoCore: CLI, обработка ключа и IV, файловый ввод-вывод."""
+"""Точка входа: связывает CLI, режимы шифрования, CSPRNG и хеши."""
 
 import sys
 
-from cryptocore import CryptoCoreError, cli_parser, file_io
-from cryptocore.csprng import generate_random_bytes
-from cryptocore.modes import cbc, cfb, ctr, ecb, ofb
+from . import CryptoCoreError
+from .cli_parser import parse_args
+from .csprng import generate_random_bytes
+from .file_io import read_file, write_file
+from .hash import compute_file
+from .modes import cbc, cfb, ctr, ecb, ofb
 
-BLOCK_SIZE = 16
+_MODES = {"ecb": ecb, "cbc": cbc, "cfb": cfb, "ofb": ofb, "ctr": ctr}
 
-_MODES = {
-    "ecb": ecb,
-    "cbc": cbc,
-    "cfb": cfb,
-    "ofb": ofb,
-    "ctr": ctr,
-}
+
+def _key_bytes(hex_key):
+    """hex-строка ключа -> байты."""
+    return bytes.fromhex(hex_key)
+
+
+def _warn_weak_key(key):
+    """Предупреждение о слабом ключе (нули, одинаковые или последовательные байты)."""
+    weak = (len(set(key)) == 1
+            or key == bytes(range(len(key)))
+            or key == bytes(range(len(key) - 1, -1, -1)))
+    if weak:
+        print("[warning] weak key detected: do not use predictable keys",
+              file=sys.stderr)
 
 
 def _process(args, data):
-    """Шифрует или расшифровывает данные, возвращает байты результата."""
-    module = _MODES[args.mode]
-
-    if args.mode == "ecb":  # ECB без IV, формат файла не менялся
-        if args.encrypt:
-            return module.encrypt(args.key, data)
-        return module.decrypt(args.key, data)
-
+    """Шифрует/расшифровывает данные выбранным режимом."""
     if args.encrypt:
-        iv = generate_random_bytes(BLOCK_SIZE)  # IV из CSPRNG
-        return iv + module.encrypt(args.key, iv, data)  # IV в начале файла
+        if args.key:
+            key = _key_bytes(args.key)
+        else:
+            key = generate_random_bytes(16)
+            print(f"[INFO] Generated random key: {key.hex()}")
+        _warn_weak_key(key)
 
-    if args.iv is not None:
-        iv = args.iv
+        if args.mode == "ecb":
+            return _MODES[args.mode].encrypt(key, data)
+        iv = generate_random_bytes(16)
+        return iv + _MODES[args.mode].encrypt(key, iv, data)
+
+    key = _key_bytes(args.key)
+    if args.mode == "ecb":
+        return _MODES[args.mode].decrypt(key, data)
+    if args.iv:
+        iv = _key_bytes(args.iv)
     else:
-        if len(data) < BLOCK_SIZE:
-            raise CryptoCoreError(
-                "input file is too short to contain an IV: "
-                f"got {len(data)} bytes, need at least {BLOCK_SIZE}")
-        iv, data = data[:BLOCK_SIZE], data[BLOCK_SIZE:]
-    return module.decrypt(args.key, iv, data)
+        if len(data) < 16:
+            raise CryptoCoreError("input file is too short to contain an IV")
+        iv, data = data[:16], data[16:]
+    return _MODES[args.mode].decrypt(key, iv, data)
+
+
+def _run_dgst(args):
+    """Подкоманда dgst: хеш файла в stdout или в файл (--output)."""
+    hex_digest = compute_file(args.input, args.algorithm)
+    line = f"{hex_digest}  {args.input}"
+    if args.output:
+        try:
+            with open(args.output, "w", encoding="utf-8", newline="\n") as f:
+                f.write(line + "\n")
+        except OSError as e:
+            raise CryptoCoreError(f"cannot write output file: {e}")
+    else:
+        print(line)
 
 
 def main(argv=None):
-    """Выполняет команду, возвращает код завершения процесса."""
+    """Точка входа CLI; ошибки выводятся в stderr с кодом возврата 1."""
+    # на Windows print пишет \r\n в pipe, а тесты сравнивают вывод с \n
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(newline="\n")
     try:
-        args = cli_parser.parse_args(argv)
-        data = file_io.read_file(args.input)
-        if args.key is None:  # ключ не передан — генерируем для шифрования
-            args.key = generate_random_bytes(cli_parser.KEY_SIZES[args.algorithm])
-            print(f"[INFO] Generated random key: {args.key.hex()}", flush=True)
+        args = parse_args(argv)
+        if args.command == "dgst":
+            _run_dgst(args)
+            return 0
+        data = read_file(args.input)
         result = _process(args, data)
-        file_io.write_file(args.output, result)
-    except (CryptoCoreError, ValueError) as exc:
-        print(f"cryptocore: error: {exc}", file=sys.stderr)
+        write_file(args.output, result)
+        return 0
+    except (CryptoCoreError, ValueError) as e:
+        print(f"cryptocore: error: {e}", file=sys.stderr)
         return 1
-    return 0
 
 
 if __name__ == "__main__":
