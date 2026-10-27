@@ -305,7 +305,7 @@ def test_cli_bad_iv_length(tmp_path):
     r = run_cli("--algorithm", "aes", "--mode", "cbc", "--decrypt",
                 "--key", KEY_HEX, "--iv", "aabb", "--input", str(src))
     assert r.returncode != 0
-    assert "iv length" in r.stderr.lower()
+    assert "invalid iv length: --iv must be 32 hex chars (16 bytes)" in r.stderr.lower()
 
 
 @pytest.mark.parametrize("mode", IV_MODES)
